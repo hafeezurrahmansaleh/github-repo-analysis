@@ -19,7 +19,10 @@ class GitHubAPIClient:
 if __name__ == "__main__":
     client = GitHubAPIClient()
     try:
-        data = client.fetch_github_data("org_name_here")
+        data = client.fetch_github_data("facebook")
         print(data)
     except Exception as e:
         print(e)
+
+
+        # file_name = "../files/organization_list.txt"
