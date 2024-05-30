@@ -28,7 +28,7 @@ class GitHubDataProducer:
 
         file_name = "../files/organization_list.txt"
         try:
-            organization_names = self.read_organization_names_from_file(file_name)
+            organization_names = self.read_org_names_from_file(file_name)
         except IOError as e:
             print(f"Error reading organization names from file: {e}")
             return
@@ -70,5 +70,7 @@ class GitHubDataProducer:
             # Close the producer
             producer.close()
 
-    if __name__ == "__main__":
-        main()
+
+if __name__ == "__main__":
+    gtp = GitHubDataProducer()
+    gtp.main()

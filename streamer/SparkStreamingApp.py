@@ -1,7 +1,7 @@
-import json
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from urllib.parse import urlparse
 
 
 class SparkStreamingApp:
@@ -16,6 +16,7 @@ class SparkStreamingApp:
             .appName("GitHubDataProcessing") \
             .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
             .config("hive.metastore.uris", self.hive_metastore_uri) \
+            .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.1") \
             .enableHiveSupport() \
             .getOrCreate()
 
@@ -51,7 +52,18 @@ class SparkStreamingApp:
         # Parse JSON data and apply schema
         repo_df = kafka_df.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
-        # Define a function to process each micro-batch
+        # Extract owner from html_url and add to DataFrame
+        repo_df = repo_df.withColumn("owner", col("html_url").rlike("https://github.com/([^/]+)/.*"))
+
+        # Rename columns to match the existing table schema
+        renamed_repo_df = repo_df.withColumnRenamed("created_at", "createdAt") \
+            .withColumnRenamed("updated_at", "updatedAt") \
+            .withColumnRenamed("pushed_at", "pushedAt") \
+            .withColumnRenamed("html_url", "htmlUrl") \
+            .withColumnRenamed("stargazers_count", "stargazersCount") \
+            .withColumnRenamed("open_issues", "openIssues")
+
+        # Function to process each micro-batch
         def process_batch(df, epoch_id):
             if not df.isEmpty():
                 print("\n\n================== Processing New Batch ==================\n")
@@ -59,7 +71,7 @@ class SparkStreamingApp:
 
                 # Check if the table exists and write to Hive
                 if self.spark.catalog.tableExists(self.table_name):
-                    print("Existing schema: " + self.spark.table(self.table_name).schema.treeString())
+                    print("Existing schema: " + str(self.spark.table(self.table_name).schema))
                     df.write.mode('append').saveAsTable(self.table_name)
                 else:
                     print("Table does not exist. Creating a new table...")
@@ -67,8 +79,8 @@ class SparkStreamingApp:
 
                 print("\n\nBatch Processing Done\n")
 
-        # Write the streaming data to the console for debugging
-        query = repo_df.writeStream \
+        # Writing the streaming data to the console for debugging
+        query = renamed_repo_df.writeStream \
             .outputMode("append") \
             .foreachBatch(process_batch) \
             .start()
@@ -83,4 +95,3 @@ if __name__ == "__main__":
         hive_metastore_uri="thrift://localhost:9083"
     )
     app.start_stream()
-
