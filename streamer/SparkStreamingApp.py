@@ -1,8 +1,22 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
+from pyspark.sql.functions import from_json, col, udf
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from urllib.parse import urlparse
+import re
 
+# Function to extract owner from html_url
+def extract_owner(url):
+    try:
+        parsed_url = urlparse(url)
+        match = re.match(r'/([^/]+)/', parsed_url.path)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        print(f"Error parsing URL: {e}")
+    return None
+
+# Register the UDF
+extract_owner_udf = udf(extract_owner, StringType())
 
 class SparkStreamingApp:
     def __init__(self, kafka_bootstrap_servers, kafka_topic, hive_metastore_uri):
@@ -49,11 +63,18 @@ class SparkStreamingApp:
         # Convert Kafka value to string
         kafka_df = kafka_df.selectExpr("CAST(value AS STRING)")
 
+        # Print the raw Kafka data for debugging
+        kafka_query = kafka_df.writeStream \
+            .outputMode("append") \
+            .format("console") \
+            .option("truncate", "false") \
+            .start()
+
         # Parse JSON data and apply schema
         repo_df = kafka_df.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
         # Extract owner from html_url and add to DataFrame
-        repo_df = repo_df.withColumn("owner", col("html_url").rlike("https://github.com/([^/]+)/.*"))
+        repo_df = repo_df.withColumn("owner", extract_owner_udf(col("html_url")))
 
         # Rename columns to match the existing table schema
         renamed_repo_df = repo_df.withColumnRenamed("created_at", "createdAt") \
@@ -69,6 +90,10 @@ class SparkStreamingApp:
                 print("\n\n================== Processing New Batch ==================\n")
                 print(f"Found {df.count()} new repository entries in the Kafka topic.\n\n")
 
+                # Show the schema and first few rows for debugging
+                df.printSchema()
+                df.show(5, truncate=False)
+
                 # Check if the table exists and write to Hive
                 if self.spark.catalog.tableExists(self.table_name):
                     print("Existing schema: " + str(self.spark.table(self.table_name).schema))
@@ -78,6 +103,8 @@ class SparkStreamingApp:
                     df.write.saveAsTable(self.table_name)
 
                 print("\n\nBatch Processing Done\n")
+            else:
+                print("Batch is empty. No data to process.\n\n")
 
         # Writing the streaming data to the console for debugging
         query = renamed_repo_df.writeStream \
@@ -86,7 +113,6 @@ class SparkStreamingApp:
             .start()
 
         query.awaitTermination()
-
 
 if __name__ == "__main__":
     app = SparkStreamingApp(
