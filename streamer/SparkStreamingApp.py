@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, udf
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.functions import from_json, col, udf, substring, explode
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType, LongType
 from urllib.parse import urlparse
 import re
 
@@ -35,10 +35,19 @@ class SparkStreamingApp:
             .getOrCreate()
 
     def start_stream(self):
+        # Read data from Kafka
+        kafka_df = self.spark \
+            .readStream \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", self.kafka_bootstrap_servers) \
+            .option("subscribe", self.kafka_topic) \
+            .option("startingOffsets", "earliest") \
+            .load()
+
         # Define schema for repository data
-        schema = StructType([
+        schema = ArrayType(StructType([
+            StructField("id", LongType(), True),
             StructField("name", StringType(), True),
-            StructField("id", StringType(), True),
             StructField("created_at", StringType(), True),
             StructField("updated_at", StringType(), True),
             StructField("size", IntegerType(), True),
@@ -49,32 +58,41 @@ class SparkStreamingApp:
             StructField("forks", IntegerType(), True),
             StructField("open_issues", IntegerType(), True),
             StructField("watchers", IntegerType(), True)
-        ])
+        ]))
 
-        # Read data from Kafka
-        kafka_df = self.spark \
-            .readStream \
-            .format("kafka") \
-            .option("kafka.bootstrap.servers", self.kafka_bootstrap_servers) \
-            .option("subscribe", self.kafka_topic) \
-            .option("startingOffsets", "earliest") \
-            .load()
+        # Parse the JSON array string into a DataFrame applying the defined schema
+        json_df = kafka_df.select(from_json(col("value").cast("string"), schema).alias("data"))
+
+        # Explode the array to get individual JSON objects
+        exploded_df = json_df.select(explode(col("data")).alias("repo"))
+
+        # Select only the required fields
+        final_df = exploded_df.select("repo.*")
+
 
         # Convert Kafka value to string
         kafka_df = kafka_df.selectExpr("CAST(value AS STRING)")
 
-        # Print the raw Kafka data for debugging
-        kafka_query = kafka_df.writeStream \
+        # # Extract the first 1000 characters for debugging
+        # truncated_kafka_df = kafka_df.withColumn("value", substring(col("value"), 1, 10000))
+
+        # # Print raw Kafka data for debugging
+        # kafka_query = truncated_kafka_df.writeStream \
+        #     .outputMode("append") \
+        #     .format("console") \
+        #     .option("truncate", "false") \
+        #     .start()
+
+
+        # Print parsed JSON data for debugging
+        json_query = final_df.writeStream \
             .outputMode("append") \
             .format("console") \
             .option("truncate", "false") \
             .start()
 
-        # Parse JSON data and apply schema
-        repo_df = kafka_df.select(from_json(col("value"), schema).alias("data")).select("data.*")
-
         # Extract owner from html_url and add to DataFrame
-        repo_df = repo_df.withColumn("owner", extract_owner_udf(col("html_url")))
+        repo_df = final_df.withColumn("owner", extract_owner_udf(col("html_url")))
 
         # Rename columns to match the existing table schema
         renamed_repo_df = repo_df.withColumnRenamed("created_at", "createdAt") \
@@ -121,3 +139,7 @@ if __name__ == "__main__":
         hive_metastore_uri="thrift://localhost:9083"
     )
     app.start_stream()
+
+
+
+
