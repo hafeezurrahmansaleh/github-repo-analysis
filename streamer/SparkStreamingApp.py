@@ -41,7 +41,7 @@ class SparkStreamingApp:
             .format("kafka") \
             .option("kafka.bootstrap.servers", self.kafka_bootstrap_servers) \
             .option("subscribe", self.kafka_topic) \
-            .option("startingOffsets", "earliest") \
+            .option("startingOffsets", "latest") \
             .load()
 
         # Define schema for repository data
@@ -69,30 +69,31 @@ class SparkStreamingApp:
         # Select only the required fields
         final_df = exploded_df.select("repo.*")
 
-
-        # Convert Kafka value to string
-        kafka_df = kafka_df.selectExpr("CAST(value AS STRING)")
-
-        # # Extract the first 1000 characters for debugging
-        # truncated_kafka_df = kafka_df.withColumn("value", substring(col("value"), 1, 10000))
-
-        # # Print raw Kafka data for debugging
-        # kafka_query = truncated_kafka_df.writeStream \
-        #     .outputMode("append") \
-        #     .format("console") \
-        #     .option("truncate", "false") \
-        #     .start()
-
-
-        # Print parsed JSON data for debugging
-        json_query = final_df.writeStream \
-            .outputMode("append") \
-            .format("console") \
-            .option("truncate", "false") \
-            .start()
-
         # Extract owner from html_url and add to DataFrame
         repo_df = final_df.withColumn("owner", extract_owner_udf(col("html_url")))
+
+        # Data Cleaning and Transformation Steps
+
+        # Handle missing values: fill with default values or drop rows with critical null fields
+        repo_df = repo_df.na.fill({
+            "name": "unknown",
+            "language": "unknown",
+            "owner": "unknown"
+        }).na.drop(subset=["id", "name", "html_url", "owner"])
+
+        # Remove duplicates
+        repo_df = repo_df.dropDuplicates(["id"])
+
+        # Type casting (if necessary)
+        repo_df = repo_df.withColumn("id", col("id").cast(LongType())) \
+            .withColumn("size", col("size").cast(IntegerType())) \
+            .withColumn("stargazers_count", col("stargazers_count").cast(IntegerType())) \
+            .withColumn("forks", col("forks").cast(IntegerType())) \
+            .withColumn("open_issues", col("open_issues").cast(IntegerType())) \
+            .withColumn("watchers", col("watchers").cast(IntegerType()))
+
+        # Filter out invalid data: example - repositories with negative sizes
+        repo_df = repo_df.filter(col("size") >= 0)
 
         # Rename columns to match the existing table schema
         renamed_repo_df = repo_df.withColumnRenamed("created_at", "createdAt") \
@@ -112,13 +113,24 @@ class SparkStreamingApp:
                 df.printSchema()
                 df.show(5, truncate=False)
 
-                # Check if the table exists and write to Hive
+                # Load existing data from Hive to check for duplicates
                 if self.spark.catalog.tableExists(self.table_name):
-                    print("Existing schema: " + str(self.spark.table(self.table_name).schema))
-                    df.write.mode('append').saveAsTable(self.table_name)
+                    existing_df = self.spark.table(self.table_name).select("id", "owner")
+                    df = df.join(existing_df, on=["id", "owner"], how="left_anti")
+
+                # Check if there are new rows to insert
+                if df.count() > 0:
+                    print(f"Inserting {df.count()} new rows into the table.")
+
+                    # Check if the table exists and write to Hive
+                    if self.spark.catalog.tableExists(self.table_name):
+                        print("Existing schema: " + str(self.spark.table(self.table_name).schema))
+                        df.write.mode('append').saveAsTable(self.table_name)
+                    else:
+                        print("Table does not exist. Creating a new table...")
+                        df.write.saveAsTable(self.table_name)
                 else:
-                    print("Table does not exist. Creating a new table...")
-                    df.write.saveAsTable(self.table_name)
+                    print("No new rows to insert.")
 
                 print("\n\nBatch Processing Done\n")
             else:
@@ -139,7 +151,3 @@ if __name__ == "__main__":
         hive_metastore_uri="thrift://localhost:9083"
     )
     app.start_stream()
-
-
-
-
