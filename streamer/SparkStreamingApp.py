@@ -41,7 +41,7 @@ class SparkStreamingApp:
             .format("kafka") \
             .option("kafka.bootstrap.servers", self.kafka_bootstrap_servers) \
             .option("subscribe", self.kafka_topic) \
-            .option("startingOffsets", "latest") \
+            .option("startingOffsets", "earliest") \
             .load()
 
         # Define schema for repository data
